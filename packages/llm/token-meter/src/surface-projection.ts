@@ -79,6 +79,7 @@ export function foldSurfaceProjection(
   const tokens = message === null ? 0 : estimateMessage(message)
   const op = event.surfaceOp
   if (op === 'append') return { deltaTokens: tokens, claim: undefined }
+  if (op.op === 'delete') return { deltaTokens: 0, claim: undefined }
   // Sessions recorded before the shadow-price protocol log replacements with
   // no adjacent metering event; the bounded state cannot reconstruct the
   // replaced range's price, so fold those neutrally — historical replay

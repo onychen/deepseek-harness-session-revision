@@ -9,7 +9,7 @@ import z from '@deepseek-ai/schemastery'
 import { BlockAssembler, deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { EpochHeader, Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { canonicalHeader, headerEquals, isSurfaceEvent } from '@deepseek-ai/dsh-session'
+import { canonicalHeader, headerEquals, isSurfaceEvent, projectCurrentBranch } from '@deepseek-ai/dsh-session'
 // Type-only: resolves the optional projection registry Context declaration.
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {
@@ -38,6 +38,23 @@ interface ReplayState {
   surfaceTokens: number
   stepStart: { turn: number; step: number; surfaceTokens: number } | undefined
   anchor: MeasurementAnchor | undefined
+}
+
+/** Reprice the effective branch prefix restored by a chronological delete. */
+function restoredTokenSurface(events: readonly SessionEvent[]): {
+  nodes: TokenSurfaceNode[]
+  deltaTokens: number
+  tokens: number
+} {
+  let nodes: TokenSurfaceNode[] = []
+  for (const event of projectCurrentBranch(events)) {
+    if (isSurfaceEvent(event)) nodes = foldSurfaceTokens(nodes, event).nodes
+  }
+  return {
+    nodes,
+    tokens: 0,
+    deltaTokens: nodes.reduce((total, node) => total + node.tokens, 0),
+  }
 }
 
 /** Sum disjoint provider usage buckets without double-counting reasoning output. */
@@ -215,7 +232,12 @@ export class TokenMeter extends Service {
     }
 
     const surface = isSurfaceEvent(event)
-      ? foldSurfaceTokens(state.surface, event)
+      ? event.surfaceOp !== 'append' && event.surfaceOp.op === 'delete'
+        ? (() => {
+          const restored = restoredTokenSurface(session.events.slice(0, event.surfaceOp.from))
+          return { ...restored, deltaTokens: restored.deltaTokens - state.surfaceTokens }
+        })()
+        : foldSurfaceTokens(state.surface, event)
       : undefined
 
     if (event.type === 'assistant/message') {

@@ -5,6 +5,7 @@
 
 import { memo, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   ModelRetryNode, TurnErrorNode, UserMessageNode,
 } from '@deepseek-ai/dsh-client-runtime/client'
@@ -235,9 +236,9 @@ export function PendingSteeringBubble({ content, loadImage, t }: {
 }
 
 /** User and admitted-steering keyed Chat renderer. */
-export const UserMessageNodeView = memo(function UserMessageNodeView({
-  node, loadImage, t,
-}: ChatNodeViewProps<'user' | 'steering'>) {
+function UserMessageView({
+  node, loadImage, t, renderSlot,
+}: ChatNodeViewProps<'user' | 'steering'> & Partial<PropsRenderSlots<'conversation.chat.user-actions'>>) {
   const data = node.data
   return (
     <UserStyleBubble
@@ -250,11 +251,24 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
           time={data.time}
           clock="start"
           className={css.actions}
+          extraActions={data.kind === 'user' && renderSlot !== undefined
+            ? renderSlot('conversation.chat.user-actions', { seq: data.seq, text })
+            : undefined}
           t={t}
         />
       )}
     />
   )
+}
+
+/** Ordinary prompt renderer with the user-message action slot. */
+export const UserMessageNodeView = memo(function UserMessageNodeView(
+  props: ChatNodeViewProps<'user'> & PropsRenderSlots<'conversation.chat.user-actions'>,
+) { return <UserMessageView {...props} /> })
+
+/** Steering renderer without history-revision actions. */
+export const SteeringMessageNodeView = memo(function SteeringMessageNodeView(props: ChatNodeViewProps<'steering'>) {
+  return <UserMessageView {...props} />
 })
 
 /** Injected-context keyed Chat renderer. */

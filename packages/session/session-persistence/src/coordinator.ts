@@ -80,6 +80,30 @@ export function sessionFormatVersionRefusal(id: string, version: number): string
     : `session "${id}" uses log format v${version}, older than the supported v${SESSION_FORMAT_VERSION}, and this build ships no upgrade path for it`
 }
 
+/**
+ * In-memory upgrade chain: index `n` converts a v(n) header to v(n+1), walked
+ * from a stored version up to {@link SESSION_FORMAT_VERSION}. A missing entry
+ * means that version (and every one below it) has no upgrade path. Event
+ * transforms ride the same chain once a step needs them; the first real step
+ * (v0→v1, the `delete` surface op) is purely additive — a v0 log is a strict
+ * subset of a v1 log — so it re-stamps only the header version and leaves the
+ * events byte-identical.
+ */
+const SESSION_VERSION_UPGRADERS: ReadonlyArray<(meta: SessionHeader) => SessionHeader> = [
+  meta => ({ ...meta, version: 1 }),
+]
+
+/** Walk a stored header through the in-memory upgrade chain (no persistence). */
+function upgradeMeta(meta: SessionHeader): SessionHeader {
+  let resolved = meta
+  while (resolved.version < SESSION_FORMAT_VERSION) {
+    const step = SESSION_VERSION_UPGRADERS[resolved.version]
+    if (step === undefined) return resolved
+    resolved = step(resolved)
+  }
+  return resolved
+}
+
 /** Coordinator policy supplied by a concrete persistence backend. */
 export interface PersistenceCoordinatorOptions {
   /** Maximum completed unpublished preparations retained for reuse. */
@@ -855,14 +879,14 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       signal?.throwIfAborted()
       if (suffix === undefined) throw new Error(`session "${id}" not found`)
       this.assertStoredId(id, suffix.meta)
-      this.assertVersion(suffix.meta)
+      const resolvedMeta = this.resolveVersion(suffix.meta)
       if (suffix.events.some(needsLegacyPrefix)) {
         const whole = await this.readStoredPrefix(id, signal)
         return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
       }
       const events = snapshotStoredEvents(suffix.events, id)
-      this.assertEventsSupported(suffix.meta, events)
-      return { meta: structuredClone(suffix.meta), events }
+      this.assertEventsSupported(resolvedMeta, events)
+      return { meta: structuredClone(resolvedMeta), events }
     }
     const whole = await this.readStoredPrefix(id, signal)
     // Sequential fallback: contiguous seqs from 0 make the suffix an index slice.
@@ -879,11 +903,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     signal?.throwIfAborted()
     if (stored === undefined) throw new Error(`session "${id}" not found`)
     this.assertStoredId(id, stored.meta)
-    this.assertVersion(stored.meta)
+    const resolvedMeta = this.resolveVersion(stored.meta)
     const events = snapshotStoredEvents(stored.events, id)
-    this.assertEventsSupported(stored.meta, events)
+    this.assertEventsSupported(resolvedMeta, events)
     return {
-      meta: structuredClone(stored.meta),
+      meta: structuredClone(resolvedMeta),
       events,
     }
   }
@@ -895,16 +919,16 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     try {
       const { meta, events, revision, tornMarker } = stored
       this.assertStoredId(id, meta)
-      this.assertVersion(meta)
+      const resolvedMeta = this.resolveVersion(meta)
       const storedEvents = adoptStoredEvents(events, id)
-      this.assertEventsSupported(meta, storedEvents)
+      this.assertEventsSupported(resolvedMeta, storedEvents)
 
       // Preserve complete interrupted events and synthesize only missing closers.
       const closers = interruptedTurnClosers(storedEvents).map(adoptSessionEvent)
       const balanced = [...storedEvents, ...closers]
       const session = this.ctx.sessions.prepare(id, {
         seed: balanced,
-        meta,
+        meta: resolvedMeta,
         seedSource: 'persistence',
       })
       const inspection: SessionInspection = Object.freeze({
@@ -1043,9 +1067,13 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     }
   }
 
-  private assertVersion(meta: SessionHeader): void {
-    if (meta.version === SESSION_FORMAT_VERSION) return
-    throw this.unsupported(meta, sessionFormatVersionRefusal(meta.id, meta.version))
+  /** Re-stamp a stored header through the in-memory upgrade chain, or refuse it. */
+  private resolveVersion(meta: SessionHeader): SessionHeader {
+    const resolved = upgradeMeta(meta)
+    if (resolved.version !== SESSION_FORMAT_VERSION) {
+      throw this.unsupported(meta, sessionFormatVersionRefusal(meta.id, meta.version))
+    }
+    return resolved
   }
 
   /**
@@ -1304,16 +1332,16 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     if (meta.cwd !== session.header.cwd) {
       throw new Error(`session "${session.header.id}" is already persisted at a different cwd (persisted: ${String(meta.cwd)}, live: ${String(session.header.cwd)}) (id collision)`)
     }
-    this.assertVersion(meta)
+    const resolvedMeta = this.resolveVersion(meta)
     const storedEvents = snapshotStoredEvents(events, session.header.id)
-    this.assertEventsSupported(meta, storedEvents)
+    this.assertEventsSupported(resolvedMeta, storedEvents)
     if (!seedCoversPrefix(seed, storedEvents)) {
       throw new Error(`session "${session.header.id}" already has a persisted log on disk that does not match this live session (id collision)`)
     }
     // Truncate-only repair (no closers): the open turn is NOT closed here.
-    if (tornMarker !== undefined) await this.backend.commitRepair(meta, tornMarker, [])
+    if (tornMarker !== undefined) await this.backend.commitRepair(resolvedMeta, tornMarker, [])
     this.states.set(session.header.id, {
-      meta: { ...meta },
+      meta: { ...resolvedMeta },
       cursor: storedEvents.length,
       materialized: true,
       owner: session,

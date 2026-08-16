@@ -432,6 +432,8 @@ export const EMPTY_CHAT_SNAPSHOT: ChatSnapshot = {
 /** The immutable snapshot contract Session hands to uSES (see the web client architecture RFC). */
 export interface ConversationSnapshot {
   sessionId: SessionId
+  /** Highest raw sequence represented by the current history/mux window. */
+  lastSeq?: number
   /** Registered target snapshots assembled from Session events. */
   views: ConversationViewSnapshotStore
   /** Final Chat target assembled from independently registered business Definitions. */

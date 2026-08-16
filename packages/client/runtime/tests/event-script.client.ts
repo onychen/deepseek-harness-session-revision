@@ -126,6 +126,8 @@ export const ev = {
         source: { kind: 'plugin', plugin: 'compact' },
       }),
     }),
+  retract: (seq: number, from: number): SessionEvent =>
+    at(seq, { type: 'session/retract', data: {}, surfaceOp: { op: 'delete', from } }),
 }
 
 /** One complete plain turn (turn/start → user → step → assistant → turn/end), 6 events from startSeq. */

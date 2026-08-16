@@ -24,6 +24,17 @@ export interface ModelSelectionRef {
   assembled: ModelSelection | undefined
 }
 
+const installedSelections = new WeakMap<Context, ModelSelectionRef>()
+
+/**
+ * Read the mutable selection installed for one Agent scope.
+ * @param agentCtx - Agent-scoped context previously passed to {@link installModelSelection}.
+ * @returns the installed reference, or undefined when the entry point has no selection layer.
+ */
+export function readModelSelection(agentCtx: Context): ModelSelectionRef | undefined {
+  return installedSelections.get(agentCtx)
+}
+
 /**
  * Couple one mutable selection to Agent-scoped prompt assembly and request routing.
  * Prompt assembly snapshots the selected model before delegating, then applies
@@ -37,6 +48,9 @@ export interface ModelSelectionRef {
  * @returns Disposer for both scoped waterfall listeners.
  */
 export function installModelSelection(agentCtx: Context, selection: ModelSelectionRef): () => void {
+  const existing = installedSelections.get(agentCtx)
+  if (existing !== undefined) throw new Error('agent model selection is already installed')
+  installedSelections.set(agentCtx, selection)
   const disposeAssembly = agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const selected = selection.current
     const assembled = await next()
@@ -69,6 +83,7 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
     },
   )
   return () => {
+    if (installedSelections.get(agentCtx) === selection) installedSelections.delete(agentCtx)
     disposeAssembly()
     disposeRequest()
   }

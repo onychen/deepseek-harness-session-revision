@@ -22,6 +22,7 @@ const requiredArtifacts = [
   'packages/core/session/lib/index.js',
   'packages/goal/goal/lib/index.js',
   'packages/goal/goal/lib/typert.host.js',
+  'packages/session/session-revision/lib/typert.remote-client.js',
   'packages/api/gateway/lib/client.js',
   'packages/api/gateway/lib/index.js',
   'packages/typert/registry/lib/client.js',
@@ -140,6 +141,11 @@ describe.skipIf(!requiredArtifacts)('Goal Remote built LIB chain', () => {
       client.typert.contexts.registerClient('agent', {
         identity: candidate => candidate.builtAgentId,
       })
+      if (typeof client.remote.sessionRevision?.withdraw !== 'function'
+        || typeof client.remote.sessionRevision?.edit !== 'function'
+        || typeof client.remote.sessionRevision?.regenerate !== 'function') {
+        throw new Error('sessionRevision Remote namespace is not mounted by the Client assembly')
+      }
 
       let invalidRejected = false
       try {

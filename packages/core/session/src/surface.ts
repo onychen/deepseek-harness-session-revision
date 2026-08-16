@@ -11,17 +11,18 @@
 import type { Message } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SurfaceEvent, SurfaceEventType, SurfaceOp } from './types.ts'
 
-/** Runtime counterpart of the message-producing event union. */
+/** Runtime counterpart of the surface-eligible event union. */
 const SURFACE_EVENT_TYPES = new Set<string>([
   'user/message',
   'assistant/message',
   'tool/result',
+  'session/retract',
 ])
 
 /**
  * Whether an event type can join the model-visible surface.
  * @param type - event type to test.
- * @returns true for one of the three message-producing event types.
+ * @returns true for a message-producing type or the pure retract type.
  */
 export function isSurfaceEligibleType(type: string): boolean {
   return SURFACE_EVENT_TYPES.has(type)
@@ -57,14 +58,31 @@ export function isAppendSurfaceEvent(
 /**
  * Narrow an event to a surface replacement: a node that shadowed an existing
  * surface range instead of appending to the tail. The counterpart of
- * {@link isAppendSurfaceEvent} over the two {@link SurfaceOp} variants.
+ * {@link isAppendSurfaceEvent} over the `replace` {@link SurfaceOp} variant —
+ * a `delete` op is not a replacement (it inserts no node).
  * @param event - event to test.
- * @returns true when the event replaced a surface range.
+ * @returns true when the event replaced a surface range with itself.
  */
 export function isReplacementSurfaceEvent(
   event: SessionEvent,
 ): event is SurfaceEvent & { surfaceOp: Extract<SurfaceOp, { op: 'replace' }> } {
-  return isSurfaceEvent(event) && event.surfaceOp !== 'append'
+  return isSurfaceEvent(event)
+    && typeof event.surfaceOp === 'object'
+    && event.surfaceOp.op === 'replace'
+}
+
+/**
+ * Narrow an event to a surface deletion: a `session/retract` whose `delete` op
+ * removed a surface range without inserting a node.
+ * @param event - event to test.
+ * @returns true when the event deleted a surface range.
+ */
+export function isDeleteSurfaceEvent(
+  event: SessionEvent,
+): event is SurfaceEvent & { surfaceOp: Extract<SurfaceOp, { op: 'delete' }> } {
+  return isSurfaceEvent(event)
+    && typeof event.surfaceOp === 'object'
+    && event.surfaceOp.op === 'delete'
 }
 
 /**
@@ -106,6 +124,11 @@ export function deriveEventMessage(event: SessionEvent): Message | null {
     case 'tool/result': {
       return event.data.message
     }
+    case 'session/retract':
+      // A pure surface deletion: removes nodes, inserts none, so it derives no
+      // message. It never appears in `surface.nodes` (delete inserts nothing);
+      // this case keeps direct per-event projection total.
+      return null
     default:
       // A non-surface event (boundary, chunk, log-only record) projects to
       // no message. Merge-extensible union: no assertNever here.
@@ -125,19 +148,29 @@ export interface SurfaceFoldReplacement {
   shadowedSeqs: number[]
 }
 
+/** One deletion operation observed while folding a session surface. */
+export interface SurfaceFoldDeletion {
+  /** Seq of the event that deleted the prior surface range. */
+  seq: number
+  /** Raw event seq whose current suffix was retracted. */
+  from: number
+}
+
 /** Complete result of replaying the surface operations in a session log. */
 export interface SurfaceFoldResult {
   /** Current surface event sequences in model-visible order. */
   nodes: number[]
   /** Replacement operations in event order. */
   replacements: SurfaceFoldReplacement[]
+  /** Deletion operations in event order. */
+  deletions: SurfaceFoldDeletion[]
 }
 
 /** Readonly live projection of the message-producing session events. */
 export interface SessionSurface {
   /** Current surface event sequences in model-visible order. */
   readonly nodes: readonly number[]
-  /** Monotonic count of committed positional replacements. */
+  /** Monotonic count of committed positional surface mutations (replacements and deletions). */
   readonly replaceGeneration: number
 }
 
@@ -154,10 +187,17 @@ interface SurfaceReplacePlan extends SurfaceFoldReplacement {
   endIdx: number
 }
 
+/** A validated deletion transition that has not mutated fold state yet. */
+interface SurfaceDeletePlan extends SurfaceFoldDeletion {
+  kind: 'delete'
+  restoredNodes: number[]
+}
+
 /** One validated surface transition that has not mutated fold state yet. */
 type SurfacePlan =
   | { kind: 'append'; seq: number }
   | SurfaceReplacePlan
+  | SurfaceDeletePlan
 
 /** Create an empty surface fold state. */
 function createFoldState(): SurfaceFoldState {
@@ -181,6 +221,16 @@ function isReplaceOp(value: object): value is Extract<SurfaceOp, { op: 'replace'
     && isEventSeq(op['end'])
 }
 
+/** Whether a runtime value is the exact positional-deletion shape. */
+function isDeleteOp(value: object): value is Extract<SurfaceOp, { op: 'delete' }> {
+  const op = value as Record<string, unknown>
+  return Object.keys(op).length === 2
+    && Object.hasOwn(op, 'op')
+    && Object.hasOwn(op, 'from')
+    && op['op'] === 'delete'
+    && isEventSeq(op['from'])
+}
+
 /** Validate event-local surface eligibility and return its operation. */
 function surfaceOpOf(event: SessionEvent): SurfaceOp | undefined {
   const raw = event as SessionEvent & { surfaceOp?: unknown; sourceEventSeqs?: unknown }
@@ -201,10 +251,9 @@ function surfaceOpOf(event: SessionEvent): SurfaceOp | undefined {
   if (op === null || typeof op !== 'object' || Array.isArray(op)) {
     throw new Error(`session event "${event.type}" carries an invalid surfaceOp`)
   }
-  if (!isReplaceOp(op)) {
-    throw new Error(`session event "${event.type}" carries an invalid replace surfaceOp`)
-  }
-  return op
+  if (isReplaceOp(op) || isDeleteOp(op)) return op
+  const candidateOp = op as { op?: unknown }
+  throw new Error(`session event "${event.type}" carries an invalid ${candidateOp.op === 'delete' ? 'delete' : 'replace'} surfaceOp`)
 }
 
 /** Validate cited source-event seqs against prior log entries and the replacement range. */
@@ -242,21 +291,21 @@ function assertProvenance(
   }
 }
 
-/** Locate one replacement range without mutating the current fold state. */
-function replacementRange(
+/** Locate one shadowed range without mutating the current fold state. */
+function shadowedRange(
   state: SurfaceFoldState,
   op: Extract<SurfaceOp, { op: 'replace' }>,
 ): Pick<SurfaceReplacePlan, 'startIdx' | 'endIdx' | 'shadowedSeqs'> {
   const startIdx = state.nodes.indexOf(op.start)
   if (startIdx === -1) {
-    throw new Error(`surface replace: start seq ${op.start} not found in surface`)
+    throw new Error(`surface mutation: start seq ${op.start} not found in surface`)
   }
   const endIdx = state.nodes.indexOf(op.end)
   if (endIdx === -1) {
-    throw new Error(`surface replace: end seq ${op.end} not found in surface`)
+    throw new Error(`surface mutation: end seq ${op.end} not found in surface`)
   }
   if (startIdx > endIdx) {
-    throw new Error(`surface replace: start seq ${op.start} (index ${startIdx}) is after end seq ${op.end} (index ${endIdx})`)
+    throw new Error(`surface mutation: start seq ${op.start} (index ${startIdx}) is after end seq ${op.end} (index ${endIdx})`)
   }
   return {
     startIdx,
@@ -330,11 +379,38 @@ function planSurfaceEvent(
   }
   const surfaceOp = surfaceOpOf(event)
   if (surfaceOp === undefined) return
+  if (event.type === 'session/retract'
+    && (typeof surfaceOp !== 'object' || surfaceOp.op !== 'delete')) {
+    throw new Error('session/retract must carry a delete surfaceOp')
+  }
   if (surfaceOp === 'append') {
     assertProvenance(event, [])
     return { kind: 'append', seq: event.seq }
   }
-  const range = replacementRange(state, surfaceOp)
+  if (surfaceOp.op === 'delete') {
+    if (event.type !== 'session/retract') {
+      throw new Error('only session/retract may carry a delete surfaceOp')
+    }
+    if (event.sourceEventSeqs !== undefined) {
+      throw new Error('session/retract must not carry sourceEventSeqs')
+    }
+    if (surfaceOp.from >= event.seq) {
+      throw new Error(`surface delete target ${surfaceOp.from} must precede retract seq ${event.seq}`)
+    }
+    const currentIndex = expectedSeq - baseSeq
+    const priorEvents = events.slice(0, currentIndex)
+    const active = projectCurrentBranch(priorEvents)
+    if (!active.some(candidate => candidate.seq === surfaceOp.from)) {
+      throw new Error(`surface delete target ${surfaceOp.from} is not on the current branch`)
+    }
+    return {
+      kind: 'delete',
+      seq: event.seq,
+      from: surfaceOp.from,
+      restoredNodes: foldSurface(priorEvents.slice(0, surfaceOp.from - baseSeq)).nodes,
+    }
+  }
+  const range = shadowedRange(state, surfaceOp)
   assertProvenance(event, range.shadowedSeqs)
   assertToolResultRewrite(event, range.shadowedSeqs, events, baseSeq)
   return {
@@ -346,14 +422,14 @@ function planSurfaceEvent(
   }
 }
 
-/** Apply one event and return replacement metadata only when one occurred. */
+/** Apply one event and return the surface mutation it committed, if any. */
 function applySurfaceEvent(
   state: SurfaceFoldState,
   event: SessionEvent,
   expectedSeq: number,
   events: readonly SessionEvent[],
   baseSeq: number,
-): SurfaceFoldReplacement | undefined {
+): SurfaceFoldReplacement | SurfaceFoldDeletion | undefined {
   const plan = planSurfaceEvent(state, event, expectedSeq, events, baseSeq)
   return applySurfacePlan(state, plan)
 }
@@ -362,36 +438,78 @@ function applySurfaceEvent(
 function applySurfacePlan(
   state: SurfaceFoldState,
   plan: SurfacePlan | undefined,
-): SurfaceFoldReplacement | undefined {
+): SurfaceFoldReplacement | SurfaceFoldDeletion | undefined {
   if (plan?.kind === 'append') {
     state.nodes.push(plan.seq)
   } else if (plan?.kind === 'replace') {
     state.nodes.splice(plan.startIdx, plan.endIdx - plan.startIdx + 1, plan.seq)
     state.replaceGeneration += 1
+  } else if (plan?.kind === 'delete') {
+    state.nodes.splice(0, state.nodes.length, ...plan.restoredNodes)
+    state.replaceGeneration += 1
   }
-  if (plan?.kind !== 'replace') return
-  return {
-    seq: plan.seq,
-    start: plan.start,
-    end: plan.end,
-    shadowedSeqs: plan.shadowedSeqs,
+  if (plan?.kind === 'replace') {
+    return {
+      seq: plan.seq,
+      start: plan.start,
+      end: plan.end,
+      shadowedSeqs: plan.shadowedSeqs,
+    }
   }
+  if (plan?.kind === 'delete') {
+    return {
+      seq: plan.seq,
+      from: plan.from,
+    }
+  }
+  return undefined
 }
 
 /**
  * Replay a complete session log through the canonical surface fold.
  * @param events - session events in contiguous seq order.
- * @returns detached current sequences and replacement history.
+ * @returns detached current sequences and the replacement/deletion history.
  * @throws when an event violates surface metadata, source-event references, range, or tool-result rewrite rules.
  */
 export function foldSurface(events: readonly SessionEvent[]): SurfaceFoldResult {
   const state = createFoldState()
   const replacements: SurfaceFoldReplacement[] = []
+  const deletions: SurfaceFoldDeletion[] = []
   for (const [index, event] of events.entries()) {
-    const replacement = applySurfaceEvent(state, event, index, events, 0)
-    if (replacement !== undefined) replacements.push(replacement)
+    const mutation = applySurfaceEvent(state, event, index, events, 0)
+    if (mutation === undefined) continue
+    if ('shadowedSeqs' in mutation) replacements.push(mutation)
+    else deletions.push(mutation)
   }
-  return { nodes: [...state.nodes], replacements }
+  return { nodes: [...state.nodes], replacements, deletions }
+}
+
+/**
+ * Project the events that belong to the current revision branch.
+ *
+ * A retract removes the target and every event up to that retract. Later raw
+ * events append normally. Retract control events are retained in the raw log
+ * only and therefore never appear in the returned projection.
+ * @param events - raw session events in ascending sequence order.
+ * @returns current-branch events with their original sequence numbers.
+ * @throws when a retract does not name an event on the current branch.
+ */
+export function projectCurrentBranch(events: readonly SessionEvent[]): SessionEvent[] {
+  const active: SessionEvent[] = []
+  for (const event of events) {
+    if (event.type !== 'session/retract') {
+      active.push(event)
+      continue
+    }
+    const op = event.surfaceOp
+    if (typeof op !== 'object' || op.op !== 'delete') continue
+    const target = active.findIndex(candidate => candidate.seq === op.from)
+    if (target === -1) {
+      throw new Error(`session retract target ${op.from} is not on the current branch`)
+    }
+    active.splice(target)
+  }
+  return active
 }
 
 /** Incremental ordered surface view and append-boundary validator. */
@@ -428,7 +546,7 @@ export class SurfaceManager implements SessionSurface {
     }
   }
 
-  /** Monotonic count of folded positional replacements. */
+  /** Monotonic count of folded positional surface mutations (replacements and deletions). */
   get replaceGeneration(): number {
     if (this._lastProcessedSeq < this.baseSeq + this.log.length - 1) this._processDelta()
     return this._state.replaceGeneration

@@ -15,7 +15,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
-import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
+import { isAppendSurfaceEvent, isJsonValue, projectCurrentBranch } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
@@ -808,14 +808,25 @@ function historyPage(
   beforeSeq: number | undefined,
   maxMessages: number | undefined,
   scope?: ScopeKey,
-): { events: HistoryEntry[]; hasMore: boolean } {
-  const page = paginate(events, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
+): { events: HistoryEntry[]; hasMore: boolean; sparse: boolean } {
+  const active = projectCurrentBranch(events)
+  const rawTail = events.at(-1)
+  // A trailing retract is a non-rendering continuity marker. It lets the
+  // browser advance its raw mux cursor after a withdraw that enqueued no new
+  // prompt, while the discarded events remain absent from the page.
+  const projected = rawTail?.type === 'session/retract' ? [...active, rawTail] : active
+  const page = paginate(projected, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
+  const branchIsSparse = active.length !== events.length
   return {
     events: page.events.map((event) => {
       const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
       return { event, ...view === undefined ? {} : { view } }
     }),
     hasMore: page.hasMore,
+    sparse: branchIsSparse || page.events.some((event, index) => {
+      const previous = page.events[index - 1]
+      return previous !== undefined && event.seq !== previous.seq + 1
+    }),
   }
 }
 
@@ -2255,6 +2266,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           return ok(request, {
             events: page.events,
             hasMore: page.hasMore,
+            sparse: page.sparse,
             ...cut.projections === undefined ? {} : { projections: cut.projections },
           })
         } catch (error: unknown) {

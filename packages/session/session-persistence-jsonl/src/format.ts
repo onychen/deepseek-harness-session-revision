@@ -231,16 +231,18 @@ interface SessionLogScan {
 
 /** Parse one complete header record supplied independently from event rows. */
 /**
- * Refuse a header carrying a format version this build does not read BEFORE
- * validating the current header shape or decoding any event row: a future
- * format need not satisfy today's structural checks at all, and its user must
- * see "upgrade the harness", never "corrupt session log".
+ * Refuse a header carrying a NEWER format version this build does not read,
+ * BEFORE validating the current header shape or decoding any event row: a
+ * future format need not satisfy today's structural checks at all, and its
+ * user must see "upgrade the harness", never "corrupt session log". An older
+ * version is left to the coordinator's in-memory upgrade chain, which
+ * re-stamps it on continue.
  * @param parsed - the JSON-parsed first line of a session artifact.
  */
 function refuseForeignFormatVersion(parsed: unknown): void {
   if (typeof parsed !== 'object' || parsed === null) return
   const { version, id } = parsed as { version?: unknown; id?: unknown }
-  if (typeof version !== 'number' || version === SESSION_FORMAT_VERSION) return
+  if (typeof version !== 'number' || version <= SESSION_FORMAT_VERSION) return
   throw new SessionFormatUnsupportedError(
     sessionFormatVersionRefusal(typeof id === 'string' ? id : String(id), version),
   )

@@ -1265,6 +1265,25 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'sessionRevision',
+    summary: 'Default Host provider for same-session history revision.',
+    description: 'Default Host provider for same-session history revision.',
+    methods: [
+      {
+        signature: '@Remote(\'edit\') edit(agent: Agent, request: SessionRevisionEditRequest): Promise<SessionRevisionResult>',
+        description: 'Replace one eligible ordinary prompt and start a new answer turn.',
+        parameters: [{ name: 'agent', description: 'live top-level agent selected by the Remote lookup.' }, { name: 'request', description: 'target, replacement text, and concurrency fields.' }],
+        returns: 'refusal, confirmation request, or committed revision state.',
+      },
+      {
+        signature: '@Remote(\'regenerate\') regenerate(agent: Agent, request: SessionRevisionRequest): Promise<SessionRevisionResult>',
+        description: 'Re-submit the first ordinary prompt of a finalized assistant message\'s turn.',
+        parameters: [{ name: 'agent', description: 'live top-level agent selected by the Remote lookup.' }, { name: 'request', description: 'assistant target and concurrency fields.' }],
+        returns: 'refusal, confirmation request, or committed revision state.',
+      },
+    ],
+  },
+  {
     key: 'sessions',
     summary: 'In-memory session store (`ctx.sessions`).',
     description: 'In-memory session store (`ctx.sessions`).\n\nPersistence is intentionally not implemented here — persistence plugins subscribe to `session/event` and flush on `session/flush` / dispose.',
@@ -3731,7 +3750,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionEventMap',
-    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'assistant/chunk\': {\n        turn: number;\n        step: number;\n        chunk: StreamChunk;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        usage?: TokenUsage;\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: CallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n        };\n        meta?: JsonValue;\n    };\n    \'todo/write\': {\n        todos: TodoItem[];\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': Record<string, never>;\n}',
+    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'assistant/chunk\': {\n        turn: number;\n        step: number;\n        chunk: StreamChunk;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        usage?: TokenUsage;\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: CallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n        };\n        meta?: JsonValue;\n    };\n    \'todo/write\': {\n        todos: TodoItem[];\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': Record<string, never>;\n    \'session/retract\': Record<string, never>;\n}',
   },
   {
     name: 'SessionEventMetadataFilter',
@@ -3864,6 +3883,30 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionResultRange',
     declaration: 'export interface SessionResultRange {\n    from?: number;\n    to?: number;\n}',
+  },
+  {
+    name: 'SessionRevisionCommittedResult',
+    declaration: 'export interface SessionRevisionCommittedResult {\n    readonly kind: \'committed\';\n    readonly retractSeq: number;\n    readonly persistence: \'persisted\' | \'failed\';\n    readonly persistenceError?: string;\n}',
+  },
+  {
+    name: 'SessionRevisionConfirmationResult',
+    declaration: 'export interface SessionRevisionConfirmationResult {\n    readonly kind: \'confirmation-required\';\n    readonly expectedLastSeq: number;\n    readonly message: string;\n}',
+  },
+  {
+    name: 'SessionRevisionEditRequest',
+    declaration: 'export interface SessionRevisionEditRequest extends SessionRevisionRequest {\n    readonly text: string;\n}',
+  },
+  {
+    name: 'SessionRevisionRejectedResult',
+    declaration: 'export interface SessionRevisionRejectedResult {\n    readonly kind: \'rejected\';\n    readonly code: \'busy\' | \'stale\' | \'invalid-target\' | \'subagent-session\' | \'attachment-unavailable\' | \'model-incompatible\';\n    readonly message: string;\n}',
+  },
+  {
+    name: 'SessionRevisionRequest',
+    declaration: 'export interface SessionRevisionRequest {\n    readonly targetSeq: number;\n    readonly expectedLastSeq: number;\n    readonly timezone: string;\n    readonly acknowledgeToolEffects?: boolean;\n}',
+  },
+  {
+    name: 'SessionRevisionResult',
+    declaration: 'export type SessionRevisionResult = SessionRevisionRejectedResult | SessionRevisionConfirmationResult | SessionRevisionCommittedResult;',
   },
   {
     name: 'SessionSearchCursor',
@@ -4223,11 +4266,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SurfaceEventType',
-    declaration: 'export type SurfaceEventType = \'user/message\' | \'assistant/message\' | \'tool/result\';',
+    declaration: 'export type SurfaceEventType = \'user/message\' | \'assistant/message\' | \'tool/result\' | \'session/retract\';',
   },
   {
     name: 'SurfaceOp',
-    declaration: 'export type SurfaceOp = \'append\' | {\n    op: \'replace\';\n    start: number;\n    end: number;\n};',
+    declaration: 'export type SurfaceOp = \'append\' | {\n    op: \'replace\';\n    start: number;\n    end: number;\n} | {\n    op: \'delete\';\n    from: number;\n};',
   },
   {
     name: 'SystemPrompt',

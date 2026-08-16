@@ -111,6 +111,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       scope: 'session'
       owner: AssistantActionOwnerProps
     }
+    /** Actions attached to one ordinary turn-opening user message. */
+    'conversation.chat.user-actions': {
+      kind: 'list'
+      scope: 'session'
+      owner: UserActionOwnerProps
+    }
     /**
      * The body of the details panel for the tool call the user selected —
      * one occupant, so taking it means rendering every tool's output, not just
@@ -338,6 +344,16 @@ export interface TurnTailOwnerProps {
 export interface AssistantActionOwnerProps {
   /** Stable identity carried from the `assistant/message` event. */
   messageId: MessageId
+  /** Raw assistant/message sequence used by history revision actions. */
+  seq: number
+}
+
+/** Owner currency of the ordinary user-message action strip. */
+export interface UserActionOwnerProps {
+  /** Raw user/message sequence used by history revision actions. */
+  seq: number
+  /** Joined prompt text offered to the edit action. */
+  text: string
 }
 
 /** Hook constrained to business data published on the current Chat Node's Turn. */

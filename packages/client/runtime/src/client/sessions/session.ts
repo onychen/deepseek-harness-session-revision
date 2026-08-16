@@ -388,8 +388,10 @@ export class Session implements SessionFace {
         return
       }
       const tail = older[older.length - 1]
-      if (tail === undefined || tail.event.seq + 1 !== this.baseSeq) {
-        // Continuity assertion: on violation drop the page fail-soft rather than render an out-of-order stream.
+      const gap = tail !== undefined && tail.event.seq + 1 !== this.baseSeq
+      if (tail === undefined || tail.event.seq >= this.baseSeq || (gap && result.value.sparse !== true)) {
+        // Current-branch pages retain raw seq values, so gaps are expected;
+        // only overlap or reversal is invalid.
         console.error(`[web-runtime] history page discontinuous: tail seq ${tail?.event.seq} vs baseSeq ${this.baseSeq}`)
         this.hasMore = false
         this.conversation.prepend([], false)
@@ -687,6 +689,10 @@ export class Session implements SessionFace {
       return
     }
     if (this.openState !== 'open') return // cold/error: no window upkeep (history fully backfills on open)
+    if (event.type === 'session/retract') {
+      void this.repairGap()
+      return
+    }
     const tailSeq = this.windowTailSeq()
     if (tailSeq !== null && event.seq > tailSeq + 1) {
       this.liveBuffer.push({ event, view })
@@ -736,6 +742,7 @@ export class Session implements SessionFace {
     const legacy = chat.legacy
     return {
       sessionId: this.sessionId,
+      ...(this.windowTailSeq() === null ? {} : { lastSeq: this.windowTailSeq() as number }),
       views: this.conversation,
       chat,
       nodes: legacy.nodes,
@@ -771,6 +778,7 @@ export class Session implements SessionFace {
   private history(payload: { beforeSeq?: number; maxMessages?: number }): Promise<RpcResponse<{
     events: HistoryEntry[]
     hasMore: boolean
+    sparse?: boolean
     projections?: ProjectionsBaseline
   }>> {
     return this.address === undefined

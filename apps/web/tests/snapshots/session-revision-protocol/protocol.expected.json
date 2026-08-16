@@ -1,0 +1,83 @@
+[
+  {
+    "endpoint": "/api/sessionRevision/edit",
+    "request": {
+      "args": {
+        "agentId": "session-revision-protocol",
+        "request": {
+          "targetSeq": 1,
+          "expectedLastSeq": 4,
+          "timezone": "Asia/Shanghai",
+          "text": "A more useful question."
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "type": "server-response",
+      "rpcId": "revision-stale",
+      "result": {
+        "ok": true,
+        "value": {
+          "kind": "rejected",
+          "code": "stale",
+          "message": "The session tail changed from 4 to 9."
+        }
+      }
+    }
+  },
+  {
+    "endpoint": "/api/sessionRevision/edit",
+    "request": {
+      "args": {
+        "agentId": "session-revision-protocol",
+        "request": {
+          "targetSeq": 1,
+          "expectedLastSeq": 9,
+          "timezone": "Asia/Shanghai",
+          "text": "A more useful question."
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "type": "server-response",
+      "rpcId": "revision-commit",
+      "result": {
+        "ok": true,
+        "value": {
+          "kind": "committed",
+          "retractSeq": 10,
+          "persistence": "persisted"
+        }
+      }
+    }
+  },
+  {
+    "endpoint": "/api/sessionRevision/edit",
+    "request": {
+      "args": {
+        "agentId": "session-revision-protocol",
+        "request": {
+          "targetSeq": 1,
+          "expectedLastSeq": 10,
+          "timezone": "Asia/Shanghai",
+          "text": "A more useful question."
+        }
+      }
+    },
+    "status": 200,
+    "response": {
+      "type": "server-response",
+      "rpcId": "revision-revised",
+      "result": {
+        "ok": true,
+        "value": {
+          "kind": "rejected",
+          "code": "busy",
+          "message": "The session must be idle with an empty queue."
+        }
+      }
+    }
+  }
+]

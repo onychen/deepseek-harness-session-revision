@@ -1350,9 +1350,42 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
         await ctx.sessionPersistence.append(m.id, oneTurnLog())
         const failure = await ctx.sessionPersistence.load(m.id).then(() => undefined, (error: unknown) => error as Error)
         expect(failure?.name).toBe('SessionFormatUnsupportedError')
-        expect(failure?.message).toMatch(/older than the supported v0.*no upgrade path/)
+        expect(failure?.message).toMatch(new RegExp(`older than the supported v${SESSION_FORMAT_VERSION}.*no upgrade path`))
       } finally {
         await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('upgrades a v0 log in memory and re-stamps it to the current version on continue', async () => {
+      const fix = await makeFixture()
+      const first = await freshCtx(fix)
+      try {
+        // `create` + `append` on a lazy state persist the supplied header
+        // verbatim, so this writes a genuine v0 artifact without a version check.
+        const m = { version: 0, id: SessionId('v0-upgrade'), createdAt: 1, cwd: WORK }
+        await first.ctx.sessionPersistence.create(m)
+        await first.ctx.sessionPersistence.append(m.id, oneTurnLog())
+      } finally {
+        await first.fiber.dispose()
+      }
+
+      const second = await freshCtx(fix)
+      try {
+        const loaded = await second.ctx.sessionPersistence.load(SessionId('v0-upgrade'))
+        expect(loaded.meta.version).toBe(SESSION_FORMAT_VERSION)
+        expect(loaded.events.map(event => event.type)).toEqual(oneTurnLog().map(event => event.type))
+
+        // Continuing the upgraded view persists the current version.
+        const resumed = second.ctx.sessions.create(SessionId('v0-upgrade'), { seed: loaded.events, meta: { cwd: WORK } })
+        resumed.append('turn/start', { turn: 2 })
+        resumed.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+        await second.ctx.sessions.flush(resumed)
+
+        const reloaded = await second.ctx.sessionPersistence.load(SessionId('v0-upgrade'))
+        expect(reloaded.meta.version).toBe(SESSION_FORMAT_VERSION)
+      } finally {
+        await second.fiber.dispose()
         await fix.cleanup()
       }
     })
