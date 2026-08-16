@@ -246,7 +246,7 @@
     - id: ui-message-feedback
       name: '@deepseek-ai/dsh-client-ui-message-feedback'
 
-    # Same-session message revision: withdraw/edit/regenerate actions.
+    # Same-session message revision: edit/regenerate actions.
     - id: ui-session-revision
       name: '@deepseek-ai/dsh-client-ui-session-revision'
 
