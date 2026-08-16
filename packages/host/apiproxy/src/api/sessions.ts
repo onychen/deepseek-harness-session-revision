@@ -262,13 +262,13 @@ export interface SessionsApi {
   Promise<RpcResponse<{ sessionId: SessionId; agentPreset?: string }>>
 
   /**
-   * Reads a window of history events; page boundaries align to append-origin message
-   * boundaries: one page = all raw events owned by a whole number of such messages (including
-   * their chunk / tool events), never cut mid-message. Model-only replacement copies consume no
-   * `maxMessages`, so a compaction's `compaction/summary` record stays on the page of its replacement. The tail
+   * Reads a window of current-branch history events; page boundaries align to append-origin message
+   * boundaries. Retracted intervals are absent, so original sequence numbers may contain gaps.
+   * Model-only replacement copies consume no `maxMessages`. The tail
    * page (beforeSeq absent) additionally carries the in-flight
    * partial — chunk events already emitted for the last unfinalized message.
-   * Each entry pairs the raw SessionEvent with the host-computed view (tool events whose
+   * A trailing retract may remain as a non-rendering mux continuity marker. Each entry pairs the
+   * SessionEvent with the host-computed view (tool events whose
    * presenter produced one, evaluated against the registry at pagination time); the client
    * rebuilds the surface from the events with the shared fold.
    * The tail page — and only the tail page — additionally carries `projections`
@@ -280,7 +280,7 @@ export interface SessionsApi {
    * never resumes or publishes an Agent.
    */
   history(request: RpcRequest<{ sessionId: SessionId; beforeSeq?: number; maxMessages?: number }>):
-  Promise<RpcResponse<{ events: HistoryEntry[]; hasMore: boolean; projections?: SessionProjectionsBlock }>>
+  Promise<RpcResponse<{ events: HistoryEntry[]; hasMore: boolean; sparse?: boolean; projections?: SessionProjectionsBlock }>>
 
   /**
    * Reads a fresh advisory model directory for an ordinary session. Provider

@@ -50,6 +50,7 @@ function projectSessionConversation(snapshot: SessionSurfaceSnapshot): Projected
         break
       }
       case 'tool/result':
+      case 'session/retract':
         break
       /* v8 ignore next 2 -- SurfaceEventType is closed and every variant is handled above. */
       default:

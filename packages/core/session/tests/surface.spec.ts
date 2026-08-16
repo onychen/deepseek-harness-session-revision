@@ -5,6 +5,7 @@ import {
   SessionId,
   foldSurface,
   isAppendSurfaceEvent,
+  isDeleteSurfaceEvent,
   isReplacementSurfaceEvent,
   isSurfaceEligibleType,
   isSurfaceEvent,
@@ -284,7 +285,7 @@ describe('SurfaceManager', () => {
     ] as SessionEvent[]
 
     expect(() => new SurfaceManager(events, baseSeq).nodes)
-      .toThrow(`surface replace: start seq ${baseSeq - 1} not found in surface`)
+      .toThrow(`surface mutation: start seq ${baseSeq - 1} not found in surface`)
   })
 
   it('shares ordered entries and nested replacement ranges with foldSurface', () => {
@@ -576,7 +577,7 @@ describe('SurfaceManager', () => {
         }),
       },
       { surfaceOp: { op: 'replace', start: 5, end: 0 }, sourceEventSeqs: [0] },
-    )).toThrow(/surface replace: start seq 5 not found/)
+    )).toThrow(/surface mutation: start seq 5 not found/)
   })
 
   it('throws when replace end is not found', () => {
@@ -597,7 +598,7 @@ describe('SurfaceManager', () => {
         }),
       },
       { surfaceOp: { op: 'replace', start: 0, end: 99 }, sourceEventSeqs: [0] },
-    )).toThrow(/surface replace: end seq 99 not found/)
+    )).toThrow(/surface mutation: end seq 99 not found/)
   })
 
   it('throws when start is after end', () => {
@@ -872,10 +873,11 @@ describe('Session.append surface opts', () => {
 })
 
 describe('surface type guards', () => {
-  it('isSurfaceEligibleType is true only for message-producing types', () => {
+  it('isSurfaceEligibleType is true for message-producing types and the retract deletion', () => {
     expect(isSurfaceEligibleType('user/message')).toBe(true)
     expect(isSurfaceEligibleType('assistant/message')).toBe(true)
     expect(isSurfaceEligibleType('tool/result')).toBe(true)
+    expect(isSurfaceEligibleType('session/retract')).toBe(true)
     expect(isSurfaceEligibleType('turn/start')).toBe(false)
     expect(isSurfaceEligibleType('assistant/chunk')).toBe(false)
   })
@@ -962,5 +964,104 @@ describe('SurfaceManager.replaceGeneration', () => {
       content: [{ type: 'text', text: 'summary' }], source: { kind: 'plugin', plugin: 'compact' },
     }), { surfaceOp: { op: 'replace', start: nodes[0]!, end: nodes[1]! }, sourceEventSeqs: [nodes[0]!, nodes[1]!] })
     expect(s.surface.replaceGeneration).toBe(1)
+  })
+})
+
+describe('surface deletions (session/retract)', () => {
+  function retractEvent(seq: number, from: number): SessionEvent {
+    return {
+      type: 'session/retract',
+      seq,
+      time: seq,
+      data: {},
+      surfaceOp: { op: 'delete', from },
+    }
+  }
+
+  it('restores the surface before the target and reports the rewind', () => {
+    const events = [
+      provenanceEvent(0, undefined),
+      provenanceEvent(1, undefined),
+      provenanceEvent(2, undefined),
+      retractEvent(3, 1),
+    ] as SessionEvent[]
+    const fold = foldSurface(events)
+    expect(fold.nodes).toEqual([0])
+    expect(fold.replacements).toEqual([])
+    expect(fold.deletions).toEqual([{ seq: 3, from: 1 }])
+  })
+
+  it('allows new events after a rewind', () => {
+    const events = [
+      provenanceEvent(0, undefined),
+      provenanceEvent(1, undefined),
+      retractEvent(2, 1),
+      provenanceEvent(3, undefined),
+    ] as SessionEvent[]
+    const fold = foldSurface(events)
+    expect(fold.nodes).toEqual([0, 3])
+    expect(fold.deletions).toEqual([{ seq: 2, from: 1 }])
+  })
+
+  it('rejects a target already removed from the current branch', () => {
+    const events = [
+      provenanceEvent(0, undefined),
+      provenanceEvent(1, undefined),
+      retractEvent(2, 1),
+      retractEvent(3, 1),
+    ] as SessionEvent[]
+    expect(() => foldSurface(events)).toThrow(/not on the current branch/)
+  })
+
+  it('rejects sourceEventSeqs on a deletion', () => {
+    const events = [
+      provenanceEvent(0, undefined),
+      { ...retractEvent(1, 0), sourceEventSeqs: [0] },
+    ] as SessionEvent[]
+    expect(() => foldSurface(events)).toThrow(/must not carry sourceEventSeqs/)
+  })
+
+  it('excludes deleted nodes from derived messages', () => {
+    const s = surfaceSession()
+    s.append('session/retract', {}, {
+      surfaceOp: { op: 'delete', from: 2 },
+    })
+    expect(s.deriveMessages().map(message => message.role)).toEqual(['user'])
+  })
+
+  it('bumps replaceGeneration on delete so deriveMessages rebuilds', () => {
+    const s = surfaceSession()
+    const before = s.surface.replaceGeneration
+    s.append('session/retract', {}, {
+      surfaceOp: { op: 'delete', from: 1 },
+    })
+    expect(s.surface.replaceGeneration).toBe(before + 1)
+    expect(s.surface.nodes).toEqual([])
+  })
+
+  it('isDeleteSurfaceEvent narrows the delete op and excludes append/replace', () => {
+    const events = [
+      provenanceEvent(0, undefined),
+      provenanceEvent(1, undefined),
+      retractEvent(2, 1),
+    ] as SessionEvent[]
+    const retract = events[2]!
+    expect(isDeleteSurfaceEvent(retract)).toBe(true)
+    expect(isAppendSurfaceEvent(retract)).toBe(false)
+    expect(isReplacementSurfaceEvent(retract)).toBe(false)
+  })
+
+  it('restores append nodes shadowed by a later compaction', () => {
+    const events = [
+      provenanceEvent(0, undefined),
+      provenanceEvent(1, undefined),
+      {
+        ...provenanceEvent(2, [0, 1]),
+        surfaceOp: { op: 'replace', start: 0, end: 1 },
+      },
+      retractEvent(3, 1),
+    ] as SessionEvent[]
+    const fold = foldSurface(events)
+    expect(fold.nodes).toEqual([0])
   })
 })

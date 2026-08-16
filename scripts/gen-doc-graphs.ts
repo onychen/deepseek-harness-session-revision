@@ -254,6 +254,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Owns the deterministic fallback, latest-title fold, and sole optional asynchronous provider registration.',
   },
   {
+    key: 'sessionRevision',
+    pkg: 'session-revision',
+    title: 'Current-session history revision',
+    mode: 'core',
+    consumers: ['client-ui-session-revision'],
+    note: 'Validates idle same-session withdrawal, editing, and regeneration, commits the append-only retract record, and enqueues replacement prompts.',
+  },
+  {
     key: 'systemPrompt',
     pkg: 'system-prompt',
     title: 'System prompt assembly registry',

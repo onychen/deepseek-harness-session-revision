@@ -121,6 +121,13 @@ interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * The user retracted the current branch from the event named by the
+   * `delete` surface operation. The raw events remain in the append-only log,
+   * while current-history projections restore the effective prefix before the
+   * target. Produces no LLM message.
+   */
+  'session/retract': Record<string, never>
 }
 ```
 
@@ -204,7 +211,7 @@ A proper discriminated union over `type` (not independent `type`/`data` unions),
  *
  * The {@link sourceEventSeqs} and {@link surfaceOp} fields are conditional:
  * they only exist on {@link SurfaceEventType} variants (`user/message`,
- * `assistant/message`, `tool/result`).
+ * `assistant/message`, `tool/result`, `session/retract`).
  * Non-surface events (boundary markers, chunks, usage, errors) never carry
  * surface metadata — the compiler enforces this at `Session.append()`
  * call sites.
@@ -248,22 +255,28 @@ type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 For `assistant/message`, a present `sourceEventSeqs: []` is a complete known-empty provider stream, while a legacy or foreign event with no field does not record which earlier events produced the message. The loop writes the field for every successful model call; every other surface event requires a non-empty list when the field is present.
 
+## Current-branch revision
+
+`session/retract` is the only non-message event allowed to carry a surface operation. Its `{ op: 'delete', from }` restores the effective surface before the named raw event, including messages hidden by a later compaction replacement. `projectCurrentBranch(events)` applies the same chronological cuts to the complete event stream for current history and search; raw persistence and export retain the removed suffix and every retract record. The default `@deepseek-ai/dsh-session-revision` Host provider commits this event only under idle maintenance and then optionally enqueues the edited or regenerated prompt.
+
 ## Surface types
 
-The three message-producing types (`SurfaceEventType` — `user/message`, `assistant/message`, `tool/result`) carry surface metadata declaring how they join the ordered derived surface. See the [session surface Agent Note](../../.agents/notes/implemented/architecture/2026-06-18-session-surface.md).
+The three message-producing types (`user/message`, `assistant/message`, and `tool/result`) and the pure `session/retract` type form `SurfaceEventType`. Their surface metadata declares how they append, replace, or delete the ordered derived surface. See the [session surface Agent Note](../../.agents/notes/implemented/architecture/2026-06-18-session-surface.md).
 
 ### `SurfaceEventType` — the message-producing subset of event types
 
 ```ts type-equiv
 /**
- * The subset of {@link SessionEventType} values whose events produce LLM
- * messages and are eligible to appear on the ordered surface. Only these
- * event types may carry {@link SurfaceOp} and {@link SessionEvent.sourceEventSeqs}.
+ * The subset of {@link SessionEventType} values eligible to carry
+ * {@link SurfaceOp} and {@link SessionEvent.sourceEventSeqs} on the ordered
+ * surface. Three produce LLM messages; `session/retract` produces none — its
+ * `delete` op is a pure surface deletion that inserts no node.
  */
 type SurfaceEventType =
   | 'user/message'
   | 'assistant/message'
   | 'tool/result'
+  | 'session/retract'
 ```
 
 ### `SurfaceOp` — how an event entered the surface
@@ -281,10 +294,15 @@ type SurfaceEventType =
  *   node. The node's {@link SessionEvent.sourceEventSeqs} must include every
  *   shadowed surface node. Used by compaction; any surface-replacing producer
  *   may use it.
+ * - `{ op: 'delete', from }`: restores the effective surface produced before
+ *   raw event `from`, without inserting a node. The target must belong to the
+ *   current branch. Only `session/retract` carries it. This chronological
+ *   rewind restores messages shadowed by a later compaction replacement.
  */
 type SurfaceOp =
   | 'append'
   | { op: 'replace'; start: number; end: number }
+  | { op: 'delete'; from: number }
 ```
 
 `'append'` is the normal tail-append path. `replace` shadows surface entries from `start` through `end` inclusive (both must be valid surface seqs; `start === end` replaces a single entry) and inserts the new event in their place.
@@ -294,7 +312,7 @@ type SurfaceOp =
 ```ts type-equiv
 /**
  * Surface placement and cited source-event seqs for {@link Session.append}. Required on
- * message-producing events and forbidden on log-only events.
+ * {@link SurfaceEventType} events and forbidden on log-only events.
  */
 interface SurfaceIntent {
   surfaceOp: SurfaceOp
@@ -302,7 +320,8 @@ interface SurfaceIntent {
    * Complete set of known source-event seqs. `assistant/message` may use a
    * present empty array for a known empty provider stream; when the field is
    * absent, the event does not record which earlier events produced the message.
-   * Other surface events require a non-empty set when this field is present.
+   * A `replace` op must list every shadowed node. A `delete` op carries no
+   * source list because its raw-event boundary is complete provenance.
    */
   sourceEventSeqs?: number[]
 }
@@ -323,7 +342,7 @@ Only `assistant/message` may carry a present empty `sourceEventSeqs`; when the f
 interface SessionSurface {
   /** Current surface event sequences in model-visible order. */
   readonly nodes: readonly number[]
-  /** Monotonic count of committed positional replacements. */
+  /** Monotonic count of committed positional surface mutations (replacements and deletions). */
   readonly replaceGeneration: number
 }
 ```
@@ -353,6 +372,8 @@ interface SurfaceFoldResult {
   nodes: number[]
   /** Replacement operations in event order. */
   replacements: SurfaceFoldReplacement[]
+  /** Deletion operations in event order. */
+  deletions: SurfaceFoldDeletion[]
 }
 ```
 
@@ -611,6 +632,42 @@ The backends that consume this contract are on [persistence.md](persistence.md).
 ## Cordis API
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxsessionrevision--sessionrevisionservice"></a>
+
+### `ctx.sessionRevision` — `SessionRevisionService`
+
+Default Host provider for same-session history revision.
+
+```ts cordis-catalog
+/**
+ * Withdraw an eligible prompt or finalized assistant message and its current suffix.
+ * @param agent - live top-level agent selected by the Remote lookup.
+ * @param request - target, compare-and-set tail, timezone, and effect acknowledgement.
+ * @returns refusal, confirmation request, or committed revision state.
+ */
+@Remote('withdraw') withdraw(agent: Agent, request: SessionRevisionRequest): Promise<SessionRevisionResult>
+
+/**
+ * Replace one eligible ordinary prompt and start a new answer turn.
+ * @param agent - live top-level agent selected by the Remote lookup.
+ * @param request - target, replacement text, and concurrency fields.
+ * @returns refusal, confirmation request, or committed revision state.
+ */
+@Remote('edit') edit(agent: Agent, request: SessionRevisionEditRequest): Promise<SessionRevisionResult>
+
+/**
+ * Re-submit the first ordinary prompt of a finalized assistant message's turn.
+ * @param agent - live top-level agent selected by the Remote lookup.
+ * @param request - assistant target and concurrency fields.
+ * @returns refusal, confirmation request, or committed revision state.
+ */
+@Remote('regenerate') regenerate(agent: Agent, request: SessionRevisionRequest): Promise<SessionRevisionResult>
+```
+
+Types: [Agent](core.md)
+
+Source: [`packages/session/session-revision/src/index.ts:66`](../../packages/session/session-revision/src/index.ts)
 
 <a id="ctxsessions--sessionstore"></a>
 

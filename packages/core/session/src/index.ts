@@ -29,8 +29,8 @@ export type { JsonValue } from './json.ts'
 export { interruptedTurnClosers, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from './repair.ts'
 export { decodeStorageRecord, packChunkRuns } from './chunk-rows.ts'
 export type { ChunkRow, StorageRecord } from './chunk-rows.ts'
-export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult } from './surface.ts'
-export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts'
+export type { SessionSurface, SurfaceFoldDeletion, SurfaceFoldReplacement, SurfaceFoldResult } from './surface.ts'
+export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isDeleteSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType, projectCurrentBranch } from './surface.ts'
 export { canonicalHeader, foldRequestHeader, headerEquals } from './request-header.ts'
 export { KNOWN_SESSION_EVENT_TYPES } from './known-event-types.ts'
 
@@ -737,7 +737,7 @@ export class Session {
       // index by construction. The non-null assertion expresses that invariant.
       // oxlint-disable-next-line typescript/no-non-null-assertion
       const msg = this.deriveEventMessage(this.log[seq]!)
-      // A surface node is one of the five message-producing types, but an
+      // A surface node produces a message, but an
       // empty-content assistant/message (a max-tokens step that hosts only
       // usage) derives to null and must not enter the transcript.
       if (msg) this.derived.push(msg)

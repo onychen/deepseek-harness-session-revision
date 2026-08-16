@@ -285,6 +285,32 @@ describe('mux live view computation', () => {
     expect(page.map(event => event.seq)).toEqual(page.map((_event, index) => third.seq + index))
   })
 
+  it('paginates the effective revision branch and marks original-sequence gaps', async () => {
+    const { ctx } = await harness()
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    const session = ctx.sessions.create()
+    ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+    session.append('turn/start', { turn: 1 })
+    appendUserText(session, 'kept prompt')
+    appendAssistantText(session, 'kept answer', 1)
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    session.append('turn/start', { turn: 2 })
+    const withdrawn = appendUserText(session, 'withdrawn prompt')
+    appendAssistantText(session, 'withdrawn answer', 1)
+    session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const retract = session.append('session/retract', {}, { surfaceOp: { op: 'delete', from: withdrawn.seq } })
+
+    const response = await api.sessions.history({
+      rpcId: RpcId('t-hist-retract'),
+      payload: { sessionId: session.id, maxMessages: 1 },
+    })
+    if (!response.result.ok) throw new Error('unreachable')
+    const page = response.result.value.events.map(entry => entry.event)
+    expect(response.result.value.sparse).toBe(true)
+    expect(page.map(event => event.seq)).toContain(retract.seq)
+    expect(page.some(event => event.seq >= withdrawn.seq && event.seq < retract.seq)).toBe(false)
+  })
+
   it('drops a disposed session from the live open-call table (result after dispose gets no view)', async () => {
     const { ctx } = await harness()
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })

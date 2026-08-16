@@ -34,8 +34,6 @@ export function SessionId(id: string): SessionId {
  * The on-disk session format version, stamped into every newly-written {@link SessionHeader}
  * and enforced by every persistence backend on load. The single source of truth for the
  * version — write sites and the load-time check all read it.
- * While the harness is unreleased it is pinned at `0`: no compatibility is
- * implied, incompatible logs are rejected, and no migration is provided.
  *
  * The version is a single monotonic integer with no major/minor split. Whether
  * a bump is needed is decided by what the WRITER emits, never by what a newer
@@ -48,12 +46,17 @@ export function SessionId(id: string): SessionId {
  * Adding an ordinary event type does not bump — the per-event
  * {@link SessionEvent.ignorable} guard covers vocabulary growth instead. When
  * in doubt, bump: a near-identity upgrade step is almost free, a missed bump
- * makes older runtimes read new logs wrong silently. The full mechanism
- * (upgrade-step chain, in-memory view conversion, migrate-on-continue) is
- * recorded in the session-log-version-mechanism Agent Note
+ * makes older runtimes read new logs wrong silently.
+ *
+ * v1 added the `delete` {@link SurfaceOp} variant (the `session/retract`
+ * surface event). The v0→v1 upgrade step is the identity: a v0 log is a strict
+ * subset of a v1 log, so viewing it needs no event rewrite, only a header
+ * re-stamp when the session is continued. The full mechanism (upgrade-step
+ * chain, in-memory view conversion, migrate-on-continue) is recorded in the
+ * session-log-version-mechanism Agent Note
  * (`.agents/notes/implemented/architecture/2026-08-10-session-log-version-mechanism.md`).
  */
-export const SESSION_FORMAT_VERSION = 0
+export const SESSION_FORMAT_VERSION = 1
 
 /**
  * Immutable validated storage metadata, kept outside the conversation event log.
@@ -330,20 +333,29 @@ export interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * The user retracted the current branch from the event named by the
+   * `delete` surface operation. The raw events remain in the append-only log,
+   * while current-history projections restore the effective prefix before the
+   * target. Produces no LLM message.
+   */
+  'session/retract': Record<string, never>
 }
 
 /** The appendable event-type keys of {@link SessionEventMap}, plugin-merged extensions included. */
 export type SessionEventType = keyof SessionEventMap
 
 /**
- * The subset of {@link SessionEventType} values whose events produce LLM
- * messages and are eligible to appear on the ordered surface. Only these
- * event types may carry {@link SurfaceOp} and {@link SessionEvent.sourceEventSeqs}.
+ * The subset of {@link SessionEventType} values eligible to carry
+ * {@link SurfaceOp} and {@link SessionEvent.sourceEventSeqs} on the ordered
+ * surface. Three produce LLM messages; `session/retract` produces none — its
+ * `delete` op is a pure surface deletion that inserts no node.
  */
 export type SurfaceEventType =
   | 'user/message'
   | 'assistant/message'
   | 'tool/result'
+  | 'session/retract'
 
 /**
  * A {@link SessionEvent} that is **on** the ordered surface — its
@@ -368,14 +380,19 @@ export type SurfaceEvent = SessionEvent<SurfaceEventType> & { surfaceOp: Surface
  *   node. The node's {@link SessionEvent.sourceEventSeqs} must include every
  *   shadowed surface node. Used by compaction; any surface-replacing producer
  *   may use it.
+ * - `{ op: 'delete', from }`: restores the effective surface produced before
+ *   raw event `from`, without inserting a node. The target must belong to the
+ *   current branch. Only `session/retract` carries it. This chronological
+ *   rewind restores messages shadowed by a later compaction replacement.
  */
 export type SurfaceOp =
   | 'append'
   | { op: 'replace'; start: number; end: number }
+  | { op: 'delete'; from: number }
 
 /**
  * Surface placement and cited source-event seqs for {@link Session.append}. Required on
- * message-producing events and forbidden on log-only events.
+ * {@link SurfaceEventType} events and forbidden on log-only events.
  */
 export interface SurfaceIntent {
   surfaceOp: SurfaceOp
@@ -383,7 +400,8 @@ export interface SurfaceIntent {
    * Complete set of known source-event seqs. `assistant/message` may use a
    * present empty array for a known empty provider stream; when the field is
    * absent, the event does not record which earlier events produced the message.
-   * Other surface events require a non-empty set when this field is present.
+   * A `replace` op must list every shadowed node. A `delete` op carries no
+   * source list because its raw-event boundary is complete provenance.
    */
   sourceEventSeqs?: number[]
 }
@@ -396,7 +414,7 @@ export interface SurfaceIntent {
  *
  * The {@link sourceEventSeqs} and {@link surfaceOp} fields are conditional:
  * they only exist on {@link SurfaceEventType} variants (`user/message`,
- * `assistant/message`, `tool/result`).
+ * `assistant/message`, `tool/result`, `session/retract`).
  * Non-surface events (boundary markers, chunks, usage, errors) never carry
  * surface metadata — the compiler enforces this at `Session.append()`
  * call sites.

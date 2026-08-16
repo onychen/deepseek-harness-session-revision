@@ -49,6 +49,13 @@ export function foldSurfaceTokens(
   if (op === 'append') {
     return { tokens, nodes: [...nodes, { seq: event.seq, tokens }], deltaTokens: tokens }
   }
+  if (op.op === 'delete') {
+    const kept = nodes.filter(node => node.seq < op.from)
+    const removed = nodes
+      .filter(node => node.seq >= op.from)
+      .reduce((total, node) => total + node.tokens, 0)
+    return { tokens: 0, nodes: kept, deltaTokens: -removed }
+  }
   const startIdx = nodes.findIndex(node => node.seq === op.start)
   const endIdx = nodes.findIndex(node => node.seq === op.end)
   if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) {

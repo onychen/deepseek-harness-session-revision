@@ -868,6 +868,30 @@ describe('remaining branches', () => {
     expect(session.getSnapshot().nodes.map(n => n.seq)).toEqual([7, 9])
   })
 
+  it('rebuilds the current branch when a live retract removes an assembled tail', async () => {
+    const { api, session } = makeSession()
+    const first = plainTurn(0, 0, 'kept', 'answer')
+    const second = plainTurn(6, 1, 'old', 'tail')
+    api.onHistory = () => histResponse([...first, ...second])
+    await session.open()
+    expect(session.getSnapshot().nodes.map(node => node.seq)).toEqual([1, 3, 7, 9])
+
+    const retract = ev.retract(12, 7)
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([...first, second[0]!, retract]) as never[],
+      hasMore: false,
+      sparse: true,
+    }))
+    session.handleMuxEnvelope('revision-retract' as never, {
+      type: 'session/event', sessionId: SID, event: retract,
+    })
+
+    await vi.waitFor(() => {
+      expect(session.getSnapshot().lastSeq).toBe(12)
+      expect(session.getSnapshot().nodes.map(node => node.seq)).toEqual([1, 3])
+    })
+  })
+
   it('successful cancel leaves no promptError', async () => {
     const { api, session } = makeSession()
     api.onHistory = () => histResponse(plainTurn(0, 0, 'a', 'b'))
